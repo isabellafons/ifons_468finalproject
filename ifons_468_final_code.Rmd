@@ -1,0 +1,550 @@
+---
+title: "final_final_code"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r}
+library(cmu.textstat)
+library(tidyverse)
+library(quanteda)
+library(quanteda.textstats)
+```
+
+Load in the dataset.
+
+```{r}
+# Get a vector of paths
+files_list <- list.files("./cc_all_files_txt",
+                         full.names = T, pattern = "*.txt", recursive = T)
+files_list <- files_list[!str_detect(files_list, "(2)")]
+
+```
+
+Add in the dates to the dataset, and do some basic text cleaning.
+
+```{r}
+# create a DF of file name, text, and date
+climate <- readtext::readtext(files_list)
+
+# extract the dates 
+dates = str_extract(climate$text,  
+                    pattern='\\w+\\s\\d+(st)?(nd)?(rd)?(th)?,\\s+\\d+')
+
+# convert to a datetime object
+dates = dates %>% as.Date(., "%B %d, %Y")
+
+```
+
+
+```{r}
+# Clean the text
+
+#strip of \n, and make it so that it is just the body text and the end
+climate$text = climate$text %>% 
+  str_extract(.,pattern = '\nBody\n\n\n\n\n(.|\n)*') %>% 
+  str_remove(., pattern = "\nBody\n\n\n\n\n") %>%
+  str_remove(., pattern  = "Classification(.|\n)*") %>%
+  str_replace_all(., "[\r\n]" , "")
+
+```
+
+Prepare and tokenize the corpus.
+
+```{r}
+# Prepare the corpus 
+climate_corpus = climate %>% corpus()
+climate_corpus$date = dates
+climate_corpus$doc_id = climate$doc_id
+
+# Some files will not work in the biber_spacy function. After determining 
+# which files those were, I removed them from the corpus.
+
+climate_corpus_clean = climate_corpus[-c(189,218,297,388,459,853,869,
+                                         927,928,929,931,930,932,933,1040,1104,1105,
+                                         1175,1237)]
+
+dates_clean = dates[-c(189,218,297,388,459,853,869,
+                                         927,928,929,931,930,932,933,1040,1104,1105,
+                                         1175,1237)]
+
+doc_id_clean= climate$doc_id[-c(189,218,297,388,459,853,869,
+                                         927,928,929,931,930,932,933,1040,1104,1105,
+                                         1175,1237)]
+
+climate_corpus_clean$date = dates_clean
+climate_corpus_clean$doc_id = doc_id_clean
+
+# Tokenize the corpus.
+climate_tokens <- climate_corpus_clean %>%
+  tokens(include_docvars=T, remove_punct = T, remove_numbers = F, 
+         remove_symbols = T, what = "word") %>%
+  tokens_tolower()  #choosing to lowercase the tokens
+```
+
+
+Create a corpus composition table by year for display purposes.
+
+```{r}
+# Create a dfm
+climate_dfm = dfm(climate_tokens)
+climate_dfm$date = dates_clean
+```
+
+```{r}
+### CORPUS COMPOSITION TABLE ###
+
+corpus_comp_df <- ntoken(climate_dfm) %>% 
+  data.frame(Tokens = .) %>%
+  rownames_to_column("Novel") %>% data.frame()
+
+corpus_comp_df$date = dates_clean
+#CREATE YEAR BUCKET HERE
+corpus_comp_df$year_bucket <- ifelse(corpus_comp_df$date >= "2011-10-21" & corpus_comp_df$date < "2012-10-20", "2011-2012", ifelse(corpus_comp_df$date >= "2012-10-21" & corpus_comp_df$date < "2013-10-20", "2012-2013",
+        ifelse(corpus_comp_df$date >= "2013-10-21" & corpus_comp_df$date < "2014-10-20", "2013-2014",
+             ifelse( corpus_comp_df$date >= "2014-10-21" & corpus_comp_df$date < "2015-10-20", "2014-2015",
+            ifelse(corpus_comp_df$date >= "2015-10-21" & corpus_comp_df$date < "2016-10-20", "2015-2016",
+                   ifelse(corpus_comp_df$date >= "2016-10-21" & corpus_comp_df$date < "2017-10-20", "2016-2017",
+                        ifelse(corpus_comp_df$date >= "2017-10-21" & corpus_comp_df$date < "2018-10-20", "2017-2018",
+                               ifelse(corpus_comp_df$date >= "2018-10-21" & corpus_comp_df$date < "2019-10-20", "2018-2019",
+                                      ifelse(corpus_comp_df$date >= "2019-10-21" & corpus_comp_df$date < "2020-10-20", "2019-2020","2020-2021")))))))))
+
+corpus_comp_df$year = format(corpus_comp_df$date,"%Y")
+```
+
+```{r}
+corpus_comp_table = corpus_comp_df %>%
+  group_by(year_bucket) %>%
+summarise(Total_tokens = sum(Tokens), 
+          Total_articles = n()) %>%
+  janitor::adorn_totals()
+```
+```{r}
+climate_tokens_no_stop = climate_tokens %>% tokens_select(., pattern = stopwords("en"), selection = "remove")
+```
+
+
+```{r}
+#create a frequency table for each 
+climate.ft = frequency_table(climate_tokens_no_stop) %>% filter(., grepl("^[a-z].*", Token))
+```
+
+
+```{r}
+#display corpus composition table 
+kableExtra::kbl(corpus_comp_table %>% rename("Total Tokens" = Total_tokens,"Total Articles" = Total_articles, "Year" = year_bucket), caption = "Composition of the Corpus by Year", booktabs = T, linesep = "") %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+
+```
+
+```{r}
+kableExtra::kbl(head(climate.ft , 10)  %>% select(Token, AF, Per_10.5), caption = "Top Frequency Words in Climate Corpus", booktabs = T, linesep = "") %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+```
+
+
+Tag the corpus using the Docuscope tagger.
+
+
+```{r}
+# Docuscope Tagging
+
+ds_dict <- dictionary(file = "./ds_dict.yml")
+
+# Docuscope tagge can be used for past tense and future tense
+climate_ds_counts <- climate_tokens %>%
+  tokens_lookup(dictionary = ds_dict, levels = 1, valuetype = "fixed") %>%
+  dfm() %>%
+  convert(to = "data.frame") 
+
+```
+
+And normalize the Docuscope counts.
+
+```{r}
+tot_counts <- quanteda::ntoken(climate_tokens) %>%
+  data.frame(tot_counts = .) %>%
+  tibble::rownames_to_column("doc_id") %>%
+  dplyr::as_tibble()
+
+climate_ds_counts <- dplyr::full_join(climate_ds_counts, tot_counts,
+                                      by = "doc_id")
+
+
+climate_ds_counts <- climate_ds_counts %>%
+  dplyr::mutate_if(is.numeric, list(~./tot_counts), na.rm = TRUE) %>%
+  dplyr::mutate_if(is.numeric, list(~.*100), na.rm = TRUE)
+
+climate_ds_counts$tot_counts <- NULL
+
+```
+
+```{r}
+climate_ds_counts$date <- dates_clean
+```
+
+Now, use the Biber tagger.
+
+```{r}
+library(spacyr)
+library(pseudobibeR)
+spacy_initialize(model = "en_core_web_sm")
+```
+
+```{r}
+# Break corpus into 4 parts 
+climate_corpus_clean1 = climate_corpus_clean[1:313]
+climate_corpus_clean2 = climate_corpus_clean[314:627]
+climate_corpus_clean3 = climate_corpus_clean[628:940]
+climate_corpus_clean4 = climate_corpus_clean[941:1249]
+
+# Create spacy objects
+cc1_spacy = spacy_parse(climate_corpus_clean1, pos = T, tag = T, dependency = T, entity = F)
+cc2_spacy = spacy_parse(climate_corpus_clean2, pos = T, tag = T, dependency = T, entity = F)
+cc3_spacy = spacy_parse(climate_corpus_clean3, pos = T, tag = T, dependency = T, entity = F)
+cc4_spacy = spacy_parse(climate_corpus_clean4, pos = T, tag = T, dependency = T, entity = F)
+
+cc1_tagged = biber_spacy(cc1_spacy )
+cc2_tagged = biber_spacy(cc2_spacy )
+cc3_tagged = biber_spacy(cc3_spacy )
+cc4_tagged = biber_spacy(cc4_spacy )
+
+climate_biber  = rbind(cc1_tagged,cc2_tagged,cc3_tagged,cc4_tagged)
+
+climate_biber$dates = dates_clean
+climate_biber$doc_id = doc_id_clean
+
+climate_biber_ordered = climate_biber[order(climate_biber$dates),]
+
+```
+
+Extract month and year as separate columns for climate_biber_ordered
+and climate_ds_counts. 
+
+```{r}
+
+#extract month
+climate_biber_ordered$month<-format(climate_biber_ordered$dates,"%m")
+climate_ds_counts$month<-format(climate_ds_counts$date,"%m")
+
+#extract year 
+climate_biber_ordered$year<-format(climate_biber_ordered$dates,"%Y")
+climate_ds_counts$year<-format(climate_ds_counts$date,"%Y")
+
+```
+
+Now, I will first plot hedges (confidence high), academic terms, boosters (confidence low), 
+
+without aggregating by month / year (just the raw data).
+
+```{r}
+p1 = ggplot(data = climate_ds_counts, aes(x = date, y = academicterms)) + 
+  geom_point() + 
+  geom_smooth(method = "loess") + 
+  labs(title = "Relative Frequency of Academic Terms ",
+       x = "Year",
+       y = "Relative Frequency")
+p2 = ggplot(data = climate_ds_counts, aes(x = date, y = confidencehigh)) + 
+  geom_point() + 
+  geom_smooth(method = "loess")+ 
+  labs(title = "Relative Frequency of High Confidence (Boosters) Terms ",
+       x = "Year",
+       y = "Relative Frequency")
+
+
+p3 = ggplot(data = climate_ds_counts, aes(x = date, y = confidencehedged)) + 
+  geom_point() + 
+  geom_smooth(method = "loess") + 
+  labs(title = "Relative Frequency of Hedged Confidence (Hedges) Terms ",
+       x = "Year",
+       y = "Relative Frequency")
+
+p4 = ggplot(data = climate_ds_counts, aes(x = date, y = positive)) + 
+  geom_point() + 
+  geom_smooth(method = "loess") + 
+  labs(title = "Relative Frequency of Positive Terms ",
+       x = "Year",
+       y = "Relative Frequency")
+p5 = ggplot(data = climate_ds_counts, aes(x = date, y = negative )) + 
+  geom_point() + 
+  geom_smooth(method = "loess") + 
+  labs(title = "Relative Frequency of Negative Terms ",
+       x = "Year",
+       y = "Relative Frequency")
+
+```
+
+```{r}
+p6 = ggplot(data = climate_biber_ordered, aes(x = dates, y = f_01_past_tense)) + 
+  geom_point() + 
+  geom_smooth(method = "loess")+ 
+  labs(title = "Relative Frequency of Past Tense Terms ",
+       x = "Year",
+       y = "Relative Frequency")
+p7 = ggplot(data = climate_biber_ordered, aes(x = dates, y = f_03_present_tense)) + 
+  geom_point() + 
+  geom_smooth(method = "loess") + 
+  labs(title = "Relative Frequency of Present Tense Terms ",
+       x = "Year",
+       y = "Relative Frequency")
+```
+
+```{r}
+p1
+p2
+p3
+p6
+p7
+```
+
+Now, I can aggregate and continue to see a few of the trends. We will need the
+aggregated data frame for the clustering section as well.
+
+```{r}
+climate_ds_aggregate = climate_ds_counts %>%
+  group_by(year,month) %>%
+  summarise(num_articles = n(),
+            avg_academicterms = sum(academicterms)/num_articles,
+            avg_confidencehigh = sum(confidencehigh)/num_articles,
+            avg_confidencehedged = sum(confidencehedged)/num_articles,
+            avg_positive = sum(positive)/num_articles,
+            avg_negative = sum(negative)/num_articles)
+
+climate_biber_aggregate = climate_biber_ordered %>%
+  group_by(year,month) %>%
+  summarise(num_articles = n(),
+            avg_past_tense = sum(f_01_past_tense) / num_articles,
+            avg_present_tense = sum( f_03_present_tense) / num_articles)
+```
+
+```{r}
+climate_ds_aggregate_yr = climate_ds_counts %>%
+  group_by(year) %>%
+  summarise(num_articles = n(),
+            avg_academicterms = sum(academicterms)/num_articles,
+            avg_confidencehigh = sum(confidencehigh)/num_articles,
+            avg_confidencehedged = sum(confidencehedged)/num_articles,
+            avg_positive = sum(positive)/num_articles,
+            avg_negative = sum(negative)/num_articles)
+
+
+climate_biber_aggregate_yr = climate_biber_ordered %>%
+  group_by(year) %>%
+  summarise(num_articles = n(),
+            avg_past_tense = sum(f_01_past_tense) / num_articles,
+            avg_present_tense = sum( f_03_present_tense) / num_articles)
+
+```
+
+```{r}
+climate_ds_aggregate_yr$year = as.numeric(climate_ds_aggregate_yr$year)
+climate_biber_aggregate_yr$year = as.numeric(climate_biber_aggregate_yr$year)
+```
+
+Add date back into the aggregated data frames.
+
+```{r}
+climate_ds_aggregate$date = as.Date(paste0(climate_ds_aggregate$month, "-",
+                                           climate_ds_aggregate$year, "-", 
+                                           "01"), "%m-%Y-%d")
+climate_biber_aggregate$date = as.Date(paste0(climate_biber_aggregate$month, "-",
+                                              climate_biber_aggregate$year, "-", 
+                                              "01"), "%m-%Y-%d")
+```
+
+
+```{r}
+ p1_agg = ggplot(data = climate_ds_aggregate, aes(x = date, y = avg_academicterms)) + 
+  geom_point() + 
+  geom_smooth(method = "loess")
+
+ p2_agg = ggplot(data = climate_ds_aggregate, aes(x = date, y =avg_confidencehigh)) + 
+  geom_point() + 
+  geom_smooth(method = "loess")
+ 
+  p3_agg = ggplot(data = climate_ds_aggregate, aes(x = date, y =avg_confidencehedged)) + 
+  geom_point() + 
+  geom_smooth(method = "loess")
+```
+
+```{r}
+  p6_agg  =  ggplot(data = climate_biber_aggregate , aes(x = date, y = avg_past_tense)) + 
+  geom_point() + 
+  geom_smooth(method = "loess")
+    
+   p7_agg = ggplot(data = climate_biber_aggregate , aes(x = date, y = avg_present_tense)) + 
+  geom_point() + 
+  geom_smooth(method = "loess")
+
+```
+
+
+Clearly not much came out of that. I turn to another method, which is 
+clustering.
+First, I make a scree plot for each variable, then set the number of clusters
+according to the elbow of the scree plot.
+
+Starting with academic terms.
+
+```{r}
+# Start with past tense
+vnc_scree(as.numeric(climate_ds_aggregate_yr$year), climate_ds_aggregate_yr$avg_academicterms)
+```
+For academic terms, there should be about 3 well-formed clusters.
+
+```{r}
+hc1 <- vnc_clust(as.numeric(climate_ds_aggregate_yr$year), climate_ds_aggregate_yr$avg_academicterms)
+plot(hc1, hang = -1, main = "Academic Terms VNC", sub = "", xlab = "")
+cut_hc1 <- rect.hclust(hc1, k=3)
+```
+
+Moving onto `confidencehigh.`
+
+```{r}
+vnc_scree(as.numeric(climate_ds_aggregate_yr$year), climate_ds_aggregate_yr$avg_confidencehigh)
+hc2 <- vnc_clust(as.numeric(climate_ds_aggregate_yr$year), 
+                 climate_ds_aggregate_yr$avg_confidencehigh, distance.measure = "sd")
+plot(hc2, hang = -1, main = "Boosters VNC", sub = "", xlab = "")
+cut_hc2 <- rect.hclust(hc2, k=6)
+```
+
+```{r}
+vnc_scree(as.numeric(climate_ds_aggregate_yr$year), climate_ds_aggregate_yr$avg_confidencehedged)
+hc3 <- vnc_clust(as.numeric(climate_ds_aggregate_yr$year), 
+                 climate_ds_aggregate_yr$avg_confidencehedged, distance.measure = "sd")
+plot(hc3, hang = -1, main = "Hedges VNC", sub = "", xlab = "")
+cut_hc3 <- rect.hclust(hc3, k=5)
+```
+
+
+```{r}
+vnc_scree(as.numeric(climate_biber_aggregate_yr$year), climate_biber_aggregate_yr$avg_past_tense)
+hc6 <- vnc_clust(as.numeric(climate_biber_aggregate_yr$year), 
+                 climate_biber_aggregate_yr$avg_past_tense, distance.measure = "sd")
+plot(hc6, hang = -1, main = "Past Tense Terms VNC", sub = "", xlab = "")
+cut_hc6 <- rect.hclust(hc6, k=4)
+```
+
+```{r}
+vnc_scree(as.numeric(climate_biber_aggregate_yr$year), climate_biber_aggregate_yr$avg_present_tense)
+hc7 <- vnc_clust(as.numeric(climate_biber_aggregate_yr$year), 
+                 climate_biber_aggregate_yr$avg_present_tense, distance.measure = "sd")
+plot(hc7, hang = -1, main = "Present Tense Terms VNC", sub = "", xlab = "")
+cut_hc7 <- rect.hclust(hc7, k=5)
+```
+Next, I can move onto bootstrapping  for periods 2011-2015 and 2016-2021.
+
+First, I creaste subsets for the two periods I want to compare. 
+```{r}
+# need resampling for 10 groups, 2011-2015 academic terms / hedges / boosters / past tense / present tense
+# and 2016-2021 academic terms / hedges / boosters / past tense / present tense
+
+# can resample the two data frames climate_biber_ordered and climate_ds_counts
+
+climate.ds.16.21  = climate_ds_counts %>% filter(., year >= 2016 & year <=2021)
+climate.ds.11.15 = climate_ds_counts %>% filter(., year >= 2011 & year <=2015)
+
+
+climate.biber.16.21 = climate_biber_ordered %>% filter(., year >= 2016 & year <=2021)
+climate.biber.11.15 = climate_biber_ordered %>% filter(., year >= 2011 & year <=2015)
+
+
+```
+
+
+These are the functions I need to perform the bootstrapping.
+```{r}
+
+resample <- function(x) {
+  return(sample(x, size=length(x), replace=TRUE))
+}
+
+resample.data.frame.climate <- function(df) {
+  return(df[resample(1:241), ])
+}
+
+# calculate value of h 
+value.h <- function(df.1.variable, df.2.variable){
+  # need to change to sum
+ if(sum(df.1.variable) > sum(df.2.variable)){
+      return(1)
+    }else if(sum(df.1.variable) == sum(df.2.variable)){
+      return(0.5)
+    }else{
+     return(0)
+    }
+}
+
+```
+
+Then, I run 1000 bootstrap cycles and calculate the h values.
+```{r}
+h.values.academicterms = rep(0,1000)
+h.values.hedges = rep(0,1000)
+h.values.boosters= rep(0,1000)
+h.values.past.tense= rep(0,1000)
+h.values.present.tense= rep(0,1000)
+
+for (i in 1:1000){
+  climate.ds.sample.1 = resample.data.frame.climate(climate.ds.11.15)
+  climate.ds.sample.2 = resample.data.frame.climate(climate.ds.16.21)
+  climate.biber.sample.1 =  resample.data.frame.climate(climate.biber.11.15)
+  climate.biber.sample.2 = resample.data.frame.climate(climate.biber.16.21)
+  
+  h.values.academicterms[i] = value.h(climate.ds.sample.1$academicterms, climate.ds.sample.2$academicterms)
+  h.values.boosters[i] = value.h(climate.ds.sample.1$confidencehigh, climate.ds.sample.2$confidencehigh)
+  h.values.hedges[i] = value.h(climate.ds.sample.1$confidencehedged, climate.ds.sample.2$confidencehedged)
+  h.values.past.tense[i] = value.h(climate.biber.sample.1$f_01_past_tense, 
+                                   climate.biber.sample.2$f_01_past_tense)
+  h.values.present.tense[i] = value.h(climate.biber.sample.1$f_03_present_tense, 
+                                   climate.biber.sample.2$f_03_present_tense)
+  
+}
+```
+
+```{r}
+
+# calculate the p-values 
+p1.academicterms = sum(h.values.academicterms)/1000
+p1.boosters = sum(h.values.boosters)/1000
+p1.hedges = sum(h.values.hedges) /1000
+p1.past.tense = sum(h.values.past.tense)/1000
+p1.present.tense = sum(h.values.present.tense)/1000
+
+
+p.academicterms = (1 + (2000*0) ) / 1001 # significant
+p.boosters = (1 + (2000*.08) ) / 1001
+p.hedges = (1 + (2000*.1) ) / 1001
+p.past.tense = (1 + (2000*0) ) / 1001 # significant
+p.present.tense = (1 + (2000*.005) ) / 1001 # significant
+
+```
+
+Putting features into a dataframe 
+```{r}
+linguistic.feature <- c("Academic Terms","Boosters","Hedges",
+                        "Past Tense", "Present Tense")
+p.value <- c(0.001,0.161,0.201,0.001,0.011)
+significant <- c("Yes","No","No","Yes","Yes")
+increase.decrease <- c("Decrease","N/A","N/A","Increase","Decrease")
+bootstrap.results = data.frame(linguistic.feature,p.value,significant, increase.decrease)
+
+
+```
+
+```{r}
+kableExtra::kbl(bootstrap.results %>% rename("Linguistic Feature" = linguistic.feature, "P-value based on 1000 sample bootstrap test" = p.value, "Significant (<0.05)" = significant,
+                                             "Inc./Dec. in Freq?" = increase.decrease), caption = "Comparison of texts between 2011-2015 and 2016-2021", booktabs = T, linesep = "") %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+
+
+```
+
+
+
+
+
